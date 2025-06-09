@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Copilot Minimal</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/uuid/8.3.2/uuid.min.js"></script>
+  <link href="https://unpkg.com/material-components-web@latest/dist/material-components-web.min.css" rel="stylesheet">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <style>
+    body {
+      margin: 0;
+      padding: 2rem;
+      font-family: Roboto, sans-serif;
+      background-color: #f4f6f8;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+
+    .container {
+      background-color: #ffffff;
+      padding: 2rem;
+      border-radius: 12px;
+      max-width: 600px;
+      width: 100%;
+      box-shadow: 0 0 10px rgba(0, 0, 0, 0.05);
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: 1.8rem;
+      text-align: center;
+      color: #333;
+    }
+
+    .response {
+        font-size: 1rem;
+        padding: 1rem;
+        border-radius: 8px;
+        background-color: #e3f2fd;
+        color: #1e88e5;
+        border: 1px solid #90caf9;
+        max-height: 600px;        
+        overflow-y: auto;         
+        white-space: pre-wrap;    
+        word-break: break-word;   
+    }
+
+    .input-group {
+      display: flex;
+      gap: 0.5rem;
+    }
+
+    button {
+      white-space: nowrap;
+      font-weight: bold;
+      border-radius: 8px;
+      padding: 0.75rem 1.25rem;
+      background-color: #1976d2;
+      color: white;
+      border: none;
+      cursor: pointer;
+      transition: background 0.2s ease;
+    }
+
+    button:hover {
+      background-color: #1565c0;
+    }
+
+    input[type="file"],
+    input[type="text"] {
+      flex: 1;
+      font-size: 1rem;
+      padding: 0.75rem;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+    }
+
+    #status {
+      font-size: 0.9rem;
+      color: #666;
+      text-align: center;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <h2>Code Assistant</h2>
+
+    <div id="responseContainer" class="response" style="display: none;"></div>
+
+    <input type="file" id="fileInput" />
+
+    <div class="input-group">
+      <input type="text" id="textInput" placeholder="Enter your message..." />
+      <button onclick="submitData()" id="submit">Submit</button>
+    </div>
+
+    <div id="status"></div>
+  </div>
+
+  <script>
+    let socket;
+    let wsUrl;
+    let putUrl;
+    let userId = uuid.v4();
+    const statusEl = document.getElementById("status");
+    const textInput = document.getElementById("textInput");
+    const fileInput = document.getElementById("fileInput");
+    const submitButton = document.getElementById("submit");
+    const responseContainer = document.getElementById("responseContainer");
+    let isSubmitted = false;
+
+    function fetch_urls() {
+        return fetch("https://dc8eru1q29n2p.cloudfront.net/config.json")
+            .then(response => response.json())
+            .then(config => {
+                wsUrl = config.websocket_url;
+                putUrl = config.put_url;
+            });
+    }
+
+    function connectWebSocket() {
+      socket = new WebSocket(wsUrl);
+
+      socket.onopen = () => {
+        console.log("WebSocket connected.");
+        socket.send(JSON.stringify({ action: "storeConnection", data: userId }));
+      };
+
+      socket.onerror = (err) => {
+        statusEl.textContent = "WebSocket error.";
+        console.error(err);
+      };
+
+      socket.onclose = () => {
+        statusEl.textContent = "Connection closed.";
+      };
+
+      socket.onmessage = (event) => {
+
+        const message = JSON.parse(event.data);
+        if (message.type === "RESULT") {
+          responseContainer.style.display = "block";
+          responseContainer.textContent = message.data;
+          statusEl.textContent = "";
+        } else if(message.type === "PROCESSING_COMPLETE") {
+            enableInputs();
+            statusEl.textContent = "Processing complete. You can now send queries.";
+        }
+      };
+    }
+
+    function submitData() {
+      const file = fileInput.files[0];
+      const text = textInput.value.trim();
+
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        alert("Couldn't establish connection to the server.");
+        return;
+      }
+
+      if (!text && !file) {
+        alert("Please provide either a URL or a file.");
+        return;
+      }
+
+      if (file && file.size > 25 * 1024 * 1024) {
+        alert("File size exceeds 25MB.");
+        return;
+      }
+
+      if (file && text) {
+        alert("Submit either a URL or a file, not both.");
+        return;
+      }
+
+      if (!isSubmitted) {
+
+        fetch(putUrl, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ 
+            fileName: file ? file.name : null, 
+            url: text ? text : null, 
+            userId: userId })
+        })
+          .then(res => res.json())
+          .then(data => {
+
+            const body = JSON.parse(data.body);
+
+            if (body.status === "URL_GENERATED") {
+
+              fetch(body.url, {
+                method: "PUT",
+                headers: { "Content-Type": file.type},
+                body: file
+              })
+                .then(res => {
+                  if (res.ok) {
+                    statusEl.textContent = "File uploaded successfully. Please wait for processing to complete.";
+                    disableInputs();
+                  } else {
+                    statusEl.textContent = "Upload failed.";
+                  }
+                });
+
+            } else if (body.status === "PROCESSING") {
+                statusEl.textContent = "Processing your request. Please wait...";
+                disableInputs();
+            } else if (body.status === "URL_NOT_VALID") {
+                statusEl.textContent = body.message;
+            } else {
+                statusEl.textContent = "Error while processing your request.";
+            }
+          })
+          .catch((e) => {
+            console.error("Error during submission:", e);
+            statusEl.textContent = "Submission error.";
+          });
+
+      } else {
+        if (!text) {
+          alert("Text cannot be empty.");
+          return;
+        }
+        socket.send(JSON.stringify({ 
+            action: "sendQuery", 
+            data: { 
+                userId, 
+                query: text 
+            } 
+        }));
+        statusEl.textContent = "Message sent.";
+      }
+
+      textInput.value = "";
+    }
+
+    function disableInputs() {
+      isSubmitted = true;
+      fileInput.disabled = true;
+      textInput.disabled = true;
+      textInput.value = "";
+      fileInput.value = "";
+      submitButton.disabled = true;
+    }
+
+    function enableInputs() {
+        textInput.disabled = false;
+        textInput.value = "";
+        submitButton.disabled = false;
+    }
+
+    fetch_urls().then(() => {
+        connectWebSocket();
+    });
+  </script>
+</body>
+
+</html>
